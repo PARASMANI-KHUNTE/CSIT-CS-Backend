@@ -6,6 +6,10 @@ const features = require('../Controllers/Features.js');
 const jwt = require('jsonwebtoken'); // Import jsonwebtoken
 const otpStore = {}; // Temporary in-memory store for OTPs (development only)
 const JWT_SECRET = process.env.JWT_SECRET;
+const authenticateToken = require('../Controllers/authMiddleware.js'); 
+
+
+
 // Signup Route: Generates OTP
 router.post('/signup', async (req, res) => {
     const { Fname, Lname, Email, Phone, Department, School, GGVID, Type } = req.body;
@@ -15,7 +19,7 @@ router.post('/signup', async (req, res) => {
         if (existingUser.exists) {
             return res.status(400).json({ message: `${existingUser.fields} already exists` });
         } else {
-            const GenOTP = await features.sendOTP(Email, Phone);
+            const GenOTP = await features.sendOTP(Email);
             if (GenOTP) {
                 otpStore[Email] = { otp: GenOTP, data: { Fname, Lname, Email, Phone, Department, School, GGVID, Type }, expiresAt: Date.now() + 300000 };
                 res.json({ message: "OTP sent successfully", redirectUrl: "/verifyOtp" });
@@ -54,14 +58,31 @@ router.post('/login', async (req, res) => {
             { expiresIn: '1h' } // Token expiry (1 hour in this example)
         );
 
-        // Send the token as a response
-        res.json({ message: "Login successful", token });
+        // Set JWT token in a secure HttpOnly cookie
+        res.cookie('token', token, {
+            httpOnly: true,  // Prevent client-side access to the cookie
+            secure: process.env.NODE_ENV === 'production',  // Only set cookies over HTTPS in production
+            maxAge: 3600000, // Cookie expiry time (1 hour in milliseconds)
+        });
 
+        res.json({ message: "Login successful" });
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: "Server error" });
     }
 });
+router.post('/logout', (req, res) => {
+    try {
+        // Clear the token cookie
+        res.clearCookie('token');
+
+        res.json({ message: "Logout successful" });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "Server error" });
+    }
+});
+
 // OTP Verification Route
 router.post('/verifyOtp', async (req, res) => {
     const { otp, Email } = req.body;
@@ -108,5 +129,98 @@ router.post('/createPassword', async (req, res) => {
         res.status(500).json({ message: "Server error" });
     }
 });
+
+
+
+
+
+// 2. Verify OTP
+router.post('/verify-reset-otp', async (req, res) => {
+    const { Email, otp } = req.body;
+
+    try {
+        const storedOTP = otpStore[Email];
+        if (!storedOTP) {
+            return res.status(400).json({ message: "OTP expired or not found" });
+        }
+
+        if (storedOTP.otp !== otp || Date.now() > storedOTP.expireAt) {
+            delete otpStore[Email];
+            return res.status(400).json({ message: "Invalid or expired OTP" });
+        }
+
+        // Generate the reset token and set it as a cookie
+        const resetToken = jwt.sign({ Email }, JWT_SECRET, { expiresIn: '15m' });
+        res.cookie('resetToken', resetToken, { httpOnly: true, maxAge: 15 * 60 * 1000 }); // 15 minutes expiry
+
+        delete otpStore[Email];
+        res.status(200).json({ message: "OTP verified" });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "Server error" });
+    }
+});
+
+
+
+
+
+// 1. Request Password Reset: Generate and send OTP
+router.post('/forgot-password', async (req, res) => {
+    const { Email } = req.body;
+
+    try {
+        // Check if user exists
+        const user = await User.findOne({ Email });
+        if (!user) {
+            return res.status(400).json({ message: "Email not found" });
+        }
+
+        // Generate and send OTP (via email)
+        const otp = await features.sendOTP(Email); // Use sendOTP to send email with OTP
+
+        // Store OTP in memory with a 5-minute expiration
+        otpStore[Email] = { otp, expireAt: Date.now() + 5 * 60 * 1000 };
+
+        res.json({ message: "OTP sent to email" });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "Server error" });
+    }
+});
+// 3. Reset Password Using Token Stored in Cookie
+router.post('/reset-password', async (req, res) => {
+    const { newPassword } = req.body;
+
+    try {
+        const resetToken = req.cookies.resetToken;
+
+        if (!resetToken) {
+            return res.status(400).json({ message: "Reset token is missing or expired" });
+        }
+
+        const decoded = jwt.verify(resetToken, JWT_SECRET);
+        const { Email } = decoded;
+
+        const user = await User.findOne({ Email });
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        const hashedPassword = await argon2.hash(newPassword);
+        user.password = hashedPassword;
+        await user.save();
+
+        res.clearCookie('resetToken');
+        res.status(200).json({ message: "Password updated successfully" });
+    } catch (error) {
+        console.error(error);
+        if (error.name === 'TokenExpiredError') {
+            return res.status(400).json({ message: "Reset token expired" });
+        }
+        res.status(500).json({ message: "Server error" });
+    }
+});
+
 
 module.exports = router;

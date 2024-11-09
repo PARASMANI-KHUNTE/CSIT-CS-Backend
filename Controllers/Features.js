@@ -48,7 +48,7 @@ const checkExistingUser = async (Email, Phone, GGVID) => {
     }
 };
 
-const sendOTP = async (Email, Phone) => {
+const sendOTP = async (Email) => {
     // Generate a random 4-digit OTP
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
 
